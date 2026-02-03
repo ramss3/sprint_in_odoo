@@ -92,6 +92,10 @@ class ProjectSprint(models.Model):
             to_add.write({"sprint_id": sprint.id})
             to_remove.write({"sprint_id": False})
 
+            auto_tasks = to_add.filtered(lambda t: not t.deadline_manual and sprint.end_date)
+            if auto_tasks:
+                auto_tasks.write({"date_deadline": sprint.end_date})
+
     """
         Verifies if the tasks being assigned to the sprint are contained in the selected sprint's project
         If not, sends a validation error
@@ -241,13 +245,27 @@ class ProjectSprint(models.Model):
             This rule is being enforced at the Object-Relational Mapping (ORM) level to ensure data integrity across all entry points.
     """
     def write(self, vals):
+        # Keep your existing "project_id cannot change" rule
         if "project_id" in vals:
             Task = self.env["project.task"]
             for sprint in self:
-                # Check in DB
                 has_tasks = Task.search_count([("sprint_id", "=", sprint.id)]) > 0
                 if has_tasks:
                     raise ValidationError("You cannot change the Project of the sprint once it has tasks.")
                 if sprint.state in ("active", "done"):
                     raise ValidationError("You cannot change the Project of the sprint once it is Active or Done.")
-        return super().write(vals)
+
+        res = super().write(vals)
+
+        if "end_date" in vals:
+            for sprint in self:
+                if not sprint.end_date:
+                    continue
+                tasks_to_update = sprint.task_ids.filtered(lambda t: not t.deadline_manual)
+                if tasks_to_update:
+                    tasks_to_update.with_context(auto_deadline_sync=True).write({
+                        "date_deadline": sprint.end_date,
+                        "deadline_manual": False,
+                    })
+
+        return res
