@@ -94,7 +94,10 @@ class ProjectSprint(models.Model):
 
             auto_tasks = to_add.filtered(lambda t: not t.deadline_manual and sprint.end_date)
             if auto_tasks:
-                auto_tasks.write({"date_deadline": sprint.end_date})
+                auto_tasks.with_context(auto_deadline_sync=True).write({
+                    "date_deadline": sprint.end_date,
+                    "deadline_manual": False,
+                })
 
     """
         Verifies if the tasks being assigned to the sprint are contained in the selected sprint's project
@@ -237,6 +240,30 @@ class ProjectSprint(models.Model):
     def action_set_done(self):
         self.write({"state_mode": "manual", "state_manual": "done"})
         return True
+
+    def _validate_task_deadlines_within_sprint(self):
+        for sprint in self:
+            if not sprint.start_date or not sprint.end_date:
+                continue
+
+            invalid = sprint.task_ids.filtered(lambda t:
+                t.date_deadline and (
+                    (sprint.start_date and t.date_deadline < sprint.start_date) or
+                    (sprint.end_date and t.date_deadline > sprint.end_date)
+                )
+            )
+
+            if invalid:
+                sample = ", ".join(invalid[:5].mapped("name"))
+                more = "" if len(invalid) <= 5 else f" (+{len(invalid) - 5} more)"
+                raise ValidationError(_(
+                    "You cannot change the sprint dates because some task deadlines would be outside the sprint period.\n\n"
+                    "   Sprint: %(s)s → %(e)s\n"
+                    "   Examples: %(sample)s%(more)s\n\n"
+                    "Fix: adjust those task deadlines first, or remove the tasks from the sprint.",
+                    s=sprint.start_date, e=sprint.end_date,
+                    sample=sample, more=more
+                ))
     
     """
         Overriding write function as UI rules are not guarantees in Odoo. Therefore, It is created a business rule enforcement:
@@ -255,14 +282,20 @@ class ProjectSprint(models.Model):
                 if sprint.state in ("active", "done"):
                     raise ValidationError("You cannot change the Project of the sprint once it is Active or Done.")
 
+        changing_dates = ("start_date" in vals) or ("end_date" in vals)
+        
         res = super().write(vals)
+
+        # HARD RULE: if dates changed, block saving if any task deadline is now invalid
+        if changing_dates:
+            self._validate_task_deadlines_within_sprint()
 
         if "end_date" in vals:
             for sprint in self:
                 if not sprint.end_date:
                     continue
                 tasks_to_update = sprint.task_ids.filtered(lambda t: not t.deadline_manual)
-                if tasks_to_update:
+                if tasks_to_update and sprint.end_date:
                     tasks_to_update.with_context(auto_deadline_sync=True).write({
                         "date_deadline": sprint.end_date,
                         "deadline_manual": False,

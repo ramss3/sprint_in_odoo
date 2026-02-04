@@ -1,4 +1,4 @@
-from odoo import models, fields, api
+from odoo import models, fields, api, _
 from odoo.exceptions import ValidationError
 
 class ProjectTask(models.Model):
@@ -25,6 +25,40 @@ class ProjectTask(models.Model):
         store=False,
     )
 
+    @api.onchange("name", "sprint_id", "project_id")
+    def _onchange_warn_duplicate_task_name_in_sprint(self):
+        for task in self:
+            name = (task.name or "").strip()
+            if not name:
+                continue
+
+            duplicates_in_sprint = [
+                ("name", "=", name),
+                ("sprint_id", "=", task.sprint_id.id),
+            ]
+
+            # Only exclude itself if it has a real DB id (int)
+            if isinstance(task.id, int):
+                duplicates_in_sprint.append(("id", "!=", task.id))
+
+            # Only warn if sprint is set
+            if not task.sprint_id:
+                continue
+
+            dup_count = self.env["project.task"].search_count(duplicates_in_sprint)
+            
+            if dup_count:
+                return {
+                    "warning": {
+                        "title": _("Possible duplicate task name"),
+                        "message": _(
+                            "Another task with the name '%(name)s' already exists in this sprint.\n\n"
+                            "This is allowed, but it may cause confusion on the sprint board. ",
+                            name=name,
+                        ),
+                    }
+                }
+
     @api.depends("sprint_id", "sprint_id.end_date")
     def _compute_sprint_default_deadline(self):
         for task in self:
@@ -46,7 +80,7 @@ class ProjectTask(models.Model):
                 )
 
             # Ensure deadline is not before sprint start
-            if sprint.start_date and task.date_deadline < sprint.start_date:
+            if task.date_deadline and sprint.start_date and task.date_deadline < sprint.start_date:
                 raise ValidationError(
                     f'The task "{task.name}" deadline ({task.date_deadline}) is before the sprint start date ({sprint.start_date}).\n\n'
                     "Please set a deadline within the sprint period."
@@ -87,20 +121,54 @@ class ProjectTask(models.Model):
         Sprint = self.env["project.sprint"]
         for vals in vals_list:
             sprint_id = vals.get("sprint_id")
-            if sprint_id:
-                sprint = Sprint.browse(sprint_id)
-                # If no deadline provided, inherit sprint end_date
-                if not vals.get("date_deadline") and sprint.end_date:
-                    vals["date_deadline"] = sprint.end_date
-                # If deadline equals sprint end_date => not manual
-                if vals.get("date_deadline") and sprint.end_date and vals["date_deadline"] == sprint.end_date:
-                    vals["deadline_manual"] = False
+            if not sprint_id:
+                continue
+
+            sprint = Sprint.browse(sprint_id)
+            if not sprint.exists():
+                continue
+
+            provided_deadline = vals.get("date_deadline")
+
+            # If no deadline provided, inherit sprint end_date and mark as auto
+            if not provided_deadline and sprint.end_date:
+                vals["date_deadline"] = sprint.end_date
+                vals["deadline_manual"] = False
+                continue
+
+            # If deadline provided, manual unless it matches sprint end_date
+            if provided_deadline and sprint.end_date and provided_deadline == sprint.end_date:
+                vals["deadline_manual"] = False
+            elif provided_deadline:
+                vals["deadline_manual"] = True
+
         return super().create(vals_list)
 
     def write(self, vals):
         auto_sync = self.env.context.get("auto_deadline_sync")
 
         res = super().write(vals)
+
+        # If sprint changed, keep deadline if in bounds, else snap to sprint end_date
+        if (not auto_sync) and ("sprint_id" in vals):
+            for task in self:
+                if not task.sprint_id or not task.sprint_id.end_date:
+                    continue
+
+                sprint = task.sprint_id
+                deadline = task.date_deadline
+
+                out_of_bound = (
+                    not deadline or
+                    (sprint.start_date and deadline < sprint.start_date) or
+                    (sprint.end_date and deadline > sprint.end_date)
+                )
+
+                if out_of_bound:
+                    task.with_context(auto_deadline_sync=True).write({
+                        "date_deadline": sprint.end_date,
+                        "deadline_manual": False,
+                    })
 
         # Only determine manual flag for real user writes (not our sync writes)
         if not auto_sync:
