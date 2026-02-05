@@ -43,9 +43,8 @@ class ProjectSprint(models.Model):
             required=True,
     )
 
-    """ Automatically determine whether a sprint is currently being planned, active, 
-        or finished based on the current date using function"_compute_state" when will automatically store in the database
-    """
+    # Automatically determine whether a sprint is currently being planned, active, 
+    # or finished based on the current date using function"_compute_state" when will automatically store in the database
     state = fields.Selection(
         [
             ("planned", "Planned"),
@@ -153,6 +152,7 @@ class ProjectSprint(models.Model):
     # Compute / inverse
     # -------------------------------------------------------------------------   
 
+    @api.depends("task_ids")
     def _compute_has_tasks(self):
         for s in self:
             s.has_tasks = bool(s.task_ids)
@@ -209,7 +209,7 @@ class ProjectSprint(models.Model):
                 sprint.end_date = default_end
                 sprint.end_date_manual = False
 
-    # sprint end date is set to the default length unless user manually changes it
+    # Sprint end date is set to the default length unless user manually changes it
     @api.onchange("end_date")
     def _onchange_end_date_mark_manual(self):
         for sprint in self:
@@ -219,7 +219,7 @@ class ProjectSprint(models.Model):
             default_end = self._default_end_date(sprint.start_date)
             sprint.end_date_manual = (sprint.end_date != default_end)
 
-    #    Sprint State updates immediately after dates are changed when in state_mode auto
+    # Sprint State updates immediately after dates are changed when in state_mode auto
     @api.onchange("start_date", "end_date", "state_mode", "state_manual")
     def _onchange_recompute_state(self):
         for sprint in self:
