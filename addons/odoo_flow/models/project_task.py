@@ -148,6 +148,8 @@ class ProjectTask(models.Model):
 
             return ok
 
+        res = super().write(vals)
+
         # if user updates date_deadline, set manual flag in the same write
         if not auto_sync:
             # If either sprint_id or date_deadline changed, re-evaluate manual flag
@@ -162,4 +164,4 @@ class ProjectTask(models.Model):
                         if not task.deadline_manual:
                             task.with_context(auto_deadline_sync=True).write({"deadline_manual": True})
 
-        return super().write(vals)
+        return res
